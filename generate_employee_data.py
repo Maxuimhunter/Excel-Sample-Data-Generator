@@ -250,249 +250,237 @@ def create_excel_with_multiple_sheets(num_employees, sheet_names, departments, r
     output.seek(0)
     return output
 
-@st.cache_resource(ttl=3600)  # Cache for 1 hour
-def get_ollama_model():
-    """Initialize and cache the Ollama model"""
+def get_local_insights(df: pd.DataFrame) -> str:
+    """Generate local insights without requiring Ollama"""
     try:
-        # Check if Ollama is running
-        try:
-            # Add debug information
-            st.sidebar.info("Checking Ollama installation...")
-            
-            # Get list of models with more detailed error handling
-            try:
-                models = ollama.list()
-                st.sidebar.json(models)  # Debug output
-            except Exception as e:
-                st.sidebar.error(f"Error calling ollama.list(): {str(e)}")
-                st.sidebar.warning("Please ensure Ollama is running. Try running 'ollama serve' in your terminal.")
-                return None
-            
-            # Debug output
-            st.sidebar.info(f"Ollama response: {models}")
-            
-            # Handle different response formats
-            if isinstance(models, dict) and 'models' in models:
-                model_list = models['models']
-            elif isinstance(models, list):
-                model_list = models
-            else:
-                st.sidebar.warning(f"Unexpected Ollama response format: {models}")
-                return None
-            
-            if not model_list:
-                st.sidebar.warning("No models found in Ollama. Please download a model first.")
-                st.sidebar.info("Try running: ollama pull gemma3:4b")
-                return None
-            
-            # Extract model names with better error handling
-            model_names = []
-            for model in model_list:
-                try:
-                    if isinstance(model, dict) and 'name' in model:
-                        model_names.append(model['name'])
-                except Exception as e:
-                    st.sidebar.warning(f"Error processing model: {model}. Error: {str(e)}")
-            
-            st.sidebar.success(f"Found models: {', '.join(model_names) if model_names else 'None'}")
-            
-            if not model_names:
-                st.sidebar.warning("No valid models found in Ollama. Please download a model first.")
-                st.sidebar.info("Try running: ollama pull gemma3:4b")
-                return None
-            
-            # Try to use preferred models in order
-            preferred_models = ['gemma3:4b', 'llama3', 'mistral', 'gpt-oss:120b', 'gpt-oss:20b']
-            
-            for model in preferred_models:
-                if model in model_names:
-                    st.sidebar.success(f"Using model: {model}")
-                    return model
-            
-            # If no preferred model found, use the first available one
-            st.sidebar.info(f"Using first available model: {model_names[0]}")
-            return model_names[0]
-            
-        except Exception as e:
-            st.error(f"Error communicating with Ollama: {str(e)}")
-            st.warning("""
-                Please ensure Ollama is installed and running. You can start it by running:
-                ```
-                ollama serve
-                ```
-                In a separate terminal window.
-            """)
-            return None
-            
+        insights = []
+        
+        # Basic statistics
+        total_employees = len(df)
+        insights.append(f"## 📊 Basic Statistics\n- Total Employees: {total_employees:,}")
+        
+        # Department distribution
+        if 'Department' in df.columns:
+            dept_dist = df['Department'].value_counts().to_dict()
+            dept_insight = "\n- ".join([f"{k}: {v} employees ({(v/total_employees)*100:.1f}%)" 
+                                     for k, v in dept_dist.items()])
+            insights.append(f"\n## 🏢 Department Distribution\n- {dept_insight}")
+        
+        # Salary analysis
+        if 'Salary' in df.columns:
+            salary_stats = df['Salary'].describe()
+            insights.append(f"""
+## 💰 Compensation Analysis
+- Average Salary: ${salary_stats['mean']:,.2f}
+- Median Salary: ${df['Salary'].median():,.2f}
+- Salary Range: ${salary_stats['min']:,.2f} - ${salary_stats['max']:,.2f}
+- Standard Deviation: ${salary_stats['std']:,.2f}""")
+        
+        # Tenure analysis
+        if 'Hire Date' in df.columns:
+            df['Tenure'] = (pd.Timestamp.now() - pd.to_datetime(df['Hire Date'])).dt.days / 365.25
+            avg_tenure = df['Tenure'].mean()
+            insights.append(f"\n## ⏳ Employee Tenure\n- Average Tenure: {avg_tenure:.1f} years")
+        
+        # Performance metrics
+        if 'Performance Rating' in df.columns:
+            perf_dist = df['Performance Rating'].value_counts().sort_index()
+            perf_insight = "\n- ".join([f"{k}: {v} employees ({(v/total_employees)*100:.1f}%)" 
+                                      for k, v in perf_dist.items()])
+            insights.append(f"\n## 📈 Performance Distribution\n- {perf_insight}")
+        
+        # Data quality
+        missing_data = df.isnull().sum().sum()
+        total_cells = df.size
+        missing_pct = (missing_data / total_cells) * 100
+        
+        insights.append(f"""
+## 🔍 Data Quality Check
+- Missing Data: {missing_data:,} cells ({missing_pct:.1f}% of total)
+- Duplicate Rows: {df.duplicated().sum():,}""")
+        
+        return "\n".join(insights)
+        
     except Exception as e:
-        st.error(f"Unexpected error initializing Ollama: {str(e)}")
-        return None
+        return f"## ⚠️ Local Analysis\nAn error occurred during local analysis: {str(e)}"
+
+def check_ollama_available():
+    """
+    Check if Ollama is available and return a list of available models
+    
+    Returns:
+        tuple: (is_ollama_running: bool, models: list, error: str)
+    """
+    try:
+        # First check if Ollama is running
+        response = ollama.list()
+        if not response or 'models' not in response:
+            return False, [], "Ollama is running but no models are installed."
+            
+        models = [model['name'] for model in response.get('models', [])]
+        return True, models, ""
+        
+    except Exception as e:
+        if "Connection refused" in str(e):
+            return False, [], "Ollama is not running. Please start the Ollama service."
+        elif "No such file or directory" in str(e):
+            return False, [], "Ollama is not installed. Please install it from https://ollama.ai/download"
+        return False, [], f"Error accessing Ollama: {str(e)}"
 
 def analyze_employee_data(df: pd.DataFrame) -> Dict[str, str]:
     """
-    Generate detailed insights about the employee data using local analysis
+    Generate detailed insights about the employee data using Ollama AI
     
     Args:
         df: DataFrame containing employee data
         
     Returns:
         Dictionary containing generated insights and analysis data
+        
+    Raises:
+        Exception: If Ollama is not available or analysis fails
     """
     try:
         # Create a copy of the dataframe to avoid modifying the original
         df_analysis = df.copy()
         
-        # Data Quality Analysis
-        data_quality_issues = []
+        # Check for available Ollama models
+        is_ollama_running, available_models, error_msg = check_ollama_available()
         
-        # Check for duplicate employee IDs
-        duplicate_ids = df_analysis.duplicated(subset=['Employee ID'], keep=False)
-        if duplicate_ids.any():
-            dup_count = duplicate_ids.sum()
-            dup_ids = df_analysis[duplicate_ids]['Employee ID'].unique()
-            data_quality_issues.append({
-                'issue': 'Duplicate Employee IDs',
-                'count': dup_count,
-                'details': f"Found {dup_count} duplicate employee IDs: {', '.join(map(str, dup_ids[:5]))}{'...' if len(dup_ids) > 5 else ''}",
-                'impact': 'Can cause confusion in employee records and reporting',
-                'solution': 'Implement unique ID generation and validation'
-            })
+        if not is_ollama_running or not available_models:
+            # Create a detailed error message with setup instructions
+            error_details = [
+                "## ❌ Ollama Setup Required",
+                "To use AI-powered analysis, please ensure Ollama is properly set up:",
+                "",
+                "### 1. Install Ollama",
+                "- Download and install from [ollama.ai/download](https://ollama.ai/download)",
+                "- Follow the installation instructions for your operating system",
+                "",
+                "### 2. Start the Ollama Service",
+                "- On macOS/Linux: Run `ollama serve` in your terminal",
+                "- On Windows: The service should start automatically after installation",
+                "",
+                "### 3. Download a Model",
+                "```bash",
+                "ollama pull gemma:2b  # Small, fast model",
+                "# or",
+                "ollama pull llama2    # Larger, more capable model",
+                "```",
+                "",
+                "### 4. Restart This Application",
+                "After completing the setup, refresh this page to try again.",
+                "",
+                f"**Error Details:** {error_msg}"
+            ]
+            
+            return {
+                'insights': '\n'.join(error_details),
+                'status': 'error',
+                'source': 'setup_required',
+                'message': 'Ollama setup required',
+                'requires_setup': True
+            }
         
-        # Check for duplicate names (potential duplicate entries)
-        if 'Name' in df_analysis.columns:
-            duplicate_names = df_analysis.duplicated(subset=['Name', 'Department', 'Position'], keep=False)
-            if duplicate_names.any():
-                dup_name_count = duplicate_names.sum()
-                dup_names = df_analysis[duplicate_names]['Name'].unique()
-                data_quality_issues.append({
-                    'issue': 'Potential Duplicate Employee Entries',
-                    'count': dup_name_count,
-                    'details': f"Found {dup_name_count} potential duplicate entries for names: {', '.join(dup_names[:3])}{'...' if len(dup_names) > 3 else ''}",
-                    'impact': 'May indicate duplicate records or data entry errors',
-                    'solution': 'Review employee records and implement data validation'
-                })
+        # Use the first available model
+        model_name = available_models[0]
         
-        # Check for leading/trailing spaces in text fields
-        text_columns = df_analysis.select_dtypes(include=['object']).columns
-        space_issues = []
-        for col in text_columns:
-            if df_analysis[col].astype(str).str.contains(r'^\s+|\s+$').any():
-                space_count = df_analysis[col].astype(str).str.contains(r'^\s+|\s+$').sum()
-                space_issues.append({
-                    'column': col,
-                    'count': space_count,
-                    'percentage': (space_count / len(df_analysis)) * 100
-                })
-        
-        if space_issues:
-            data_quality_issues.append({
-                'issue': 'Leading/Trailing Spaces',
-                'count': sum(issue['count'] for issue in space_issues),
-                'details': 'Found in columns: ' + ', '.join(f"{issue['column']} ({issue['count']} records, {issue['percentage']:.1f}%)" for issue in space_issues),
-                'impact': 'Can cause matching and sorting issues in analysis',
-                'solution': 'Implement data cleaning to trim whitespace during data entry'
-            })
-        
-        # Check for inconsistent formatting in specific columns
-        if 'Email' in df_analysis.columns:
-            email_format_issues = ~df_analysis['Email'].str.contains(r'^[^\s@]+@[^\s@]+\.[^\s@]+$', na=False)
-            if email_format_issues.any():
-                invalid_emails = email_format_issues.sum()
-                data_quality_issues.append({
-                    'issue': 'Invalid Email Formats',
-                    'count': invalid_emails,
-                    'details': f"Found {invalid_emails} email addresses with invalid format",
-                    'impact': 'Communication issues and failed email deliveries',
-                    'solution': 'Implement email format validation'
-                })
-        
-        # Basic metrics
+        # Calculate basic statistics
         num_employees = len(df_analysis)
+        avg_salary = df_analysis['Salary'].mean() if 'Salary' in df_analysis.columns else None
+        dept_distribution = df_analysis['Department'].value_counts().to_dict() if 'Department' in df_analysis.columns else {}
         
-        # Add data quality section to insights
-        insights = ["# Employee Data Analysis Report\n"]
+        # Prepare structured prompt for AI analysis
+        prompt = """
+        You are a data analyst providing a comprehensive report on employee data.
+        Analyze the following data and provide detailed insights in the specified format.
         
-        # Add Data Quality section if there are any issues
-        if data_quality_issues:
-            insights.append("## Data Quality Assessment")
-            insights.append("### Data Quality Issues Found")
-            insights.append("The following data quality issues were identified in the dataset:")
-            
-            for issue in data_quality_issues:
-                insights.append(f"\n#### {issue['issue']} ({issue['count']} instances)")
-                insights.append(f"- **Details**: {issue['details']}")
-                insights.append(f"- **Potential Impact**: {issue['impact']}")
-                insights.append(f"- **Recommended Solution**: {issue['solution']}")
-            
-            # Add data cleaning recommendations
-            insights.append("\n### Data Cleaning Recommendations")
-            insights.append("1. **Implement Data Validation**: Add validation rules during data entry to prevent common issues")
-            insights.append("2. **Regular Data Audits**: Schedule periodic data quality checks to identify and fix issues")
-            insights.append("3. **Standardize Data Entry**: Use dropdown menus and formatted fields to ensure consistency")
-            insights.append("4. **Automated Cleaning**: Implement scripts to automatically clean common data issues")
-            insights.append("5. **Training**: Provide training for staff on proper data entry procedures\n")
-        else:
-            insights.append("## Data Quality Assessment")
-            insights.append("No significant data quality issues were detected in the dataset.\n")
-        dept_counts = df_analysis['Department'].value_counts().to_dict()
-        avg_salary = df_analysis['Salary'].mean()
-        max_salary = df_analysis['Salary'].max()
-        min_salary = df_analysis['Salary'].min()
-        salary_range = max_salary - min_salary
-        median_salary = df_analysis['Salary'].median()
-        salary_std = df_analysis['Salary'].std()
+        ## Data Overview:
+        - Total employees: {num_employees}
+        - Average salary: ${avg_salary:,.2f} (if available)
+        - Department distribution:
+        {dept_distribution}
         
-        # Calculate salary distribution
-        salary_quartiles = df_analysis['Salary'].quantile([0.1, 0.25, 0.5, 0.75, 0.9]).to_dict()
+        ## Required Analysis Sections:
+        1. **Basic Statistics**
+           - Key metrics and statistics about the workforce
+           - Employee distribution patterns
+           
+        2. **Department Analysis**
+           - Size and composition of each department
+           - Notable patterns or imbalances
+           - Departmental comparisons
+           
+        3. **Compensation Insights**
+           - Salary distribution and ranges
+           - Identification of outliers
+           - Pay equity analysis
+           
+        4. **Data Quality Assessment**
+           - Missing or inconsistent data
+           - Data validation findings
+           - Recommendations for data improvement
+           
+        5. **Strategic Recommendations**
+           - 3-5 key findings
+           - Actionable business recommendations
+           - Areas for further investigation
         
-        # Calculate salary bands
-        salary_bands = {
-            'Low (Bottom 25%)': (min_salary, salary_quartiles[0.25]),
-            'Lower Middle (25-50%)': (salary_quartiles[0.25], salary_quartiles[0.5]),
-            'Upper Middle (50-75%)': (salary_quartiles[0.5], salary_quartiles[0.75]),
-            'High (Top 25%)': (salary_quartiles[0.75], max_salary)
+        ## Guidelines:
+        - Use clear, professional language
+        - Include specific data points to support your analysis
+        - Structure the response with markdown headers (## for main sections, ### for subsections)
+        - Use bullet points for lists
+        - Be concise but thorough
+        
+        Now, provide your analysis below:
+        """.format(
+            num_employees=num_employees,
+            avg_salary=avg_salary if avg_salary is not None else 0,
+            dept_distribution='\n'.join([f"  - {dept}: {count} employees" for dept, count in dept_distribution.items()])
+        )
+        
+        # Include sample data for analysis
+        prompt += "\n\n## Sample Data (first 5 rows):\n" + df_analysis.head().to_string()
+        
+        if 'Salary' in df_analysis.columns:
+            prompt += "\n\n## Salary Statistics:\n" + df_analysis['Salary'].describe().to_string()
+        
+        # Get AI analysis
+        response = ollama.generate(
+            model=model_name,
+            prompt=prompt,
+            format='markdown',
+            options={
+                'temperature': 0.3,
+                'num_ctx': 4096,
+                'top_p': 0.9,
+                'top_k': 40
+            }
+        )
+        
+        ai_insights = response.get('response', '').strip()
+        
+        # Ensure the response has proper markdown formatting
+        if not ai_insights.startswith('#'):
+            ai_insights = "# AI-Powered Employee Analysis\n\n" + ai_insights
+        
+        return {
+            'insights': ai_insights,
+            'status': 'success',
+            'source': 'ollama',
+            'model': model_name
         }
         
-        # Calculate employees in each salary band
-        band_counts = {}
-        for band, (low, high) in salary_bands.items():
-            band_counts[band] = len(df_analysis[(df_analysis['Salary'] >= low) & (df_analysis['Salary'] <= high)])
-        
-        # Enhanced department analysis
-        dept_analysis = []
-        for dept, count in dept_counts.items():
-            dept_df = df_analysis[df_analysis['Department'] == dept]
-            dept_avg = dept_df['Salary'].mean()
-            dept_median = dept_df['Salary'].median()
-            dept_min = dept_df['Salary'].min()
-            dept_max = dept_df['Salary'].max()
-            dept_std = dept_df['Salary'].std()
-            dept_pct = (count / num_employees) * 100
-            
-            # Calculate salary distribution within department
-            dept_quartiles = dept_df['Salary'].quantile([0.25, 0.5, 0.75]).to_dict()
-            
-            # Calculate gender distribution if available
-            gender_dist = {}
-            if 'Gender' in df_analysis.columns:
-                gender_dist = dept_df['Gender'].value_counts().to_dict()
-            
-            dept_analysis.append({
-                'name': dept,
-                'count': count,
-                'avg_salary': dept_avg,
-                'median_salary': dept_median,
-                'min_salary': dept_min,
-                'max_salary': dept_max,
-                'std_salary': dept_std,
-                'quartiles': dept_quartiles,
-                'gender_dist': gender_dist,
-                'pct': dept_pct
-            })
-        
-        # Sort departments by average salary (highest first)
-        dept_analysis.sort(key=lambda x: x['avg_salary'], reverse=True)
-        
+    except Exception as e:
+        error_msg = f"AI analysis failed: {str(e)}"
+        st.sidebar.error(error_msg)
+        return {
+            'insights': "# Analysis Error\n\nAn error occurred while analyzing the data.",
+            'status': 'error',
+            'message': error_msg,
+            'source': 'error'
+        }
         # Executive Summary
         insights.append("## Executive Summary")
         insights.append(
@@ -780,7 +768,7 @@ def analyze_employee_data(df: pd.DataFrame) -> Dict[str, str]:
                       f"An error occurred during analysis: {error_msg}\n\n" \
                       "## Basic Metrics\n" \
                       f"- Total Employees: {len(df) if 'df' in locals() else 'N/A'}\n" \
-                      f"- Average Salary: ${df['Salary'].mean():,.2f if 'df' in locals() and 'Salary' in df.columns else 'N/A'}",
+                      f"- Average Salary: ${df['Salary'].mean():,.2f}" if 'Salary' in df.columns else "- Average Salary: N/A",
             'status': 'error',
             'message': error_msg
         }
@@ -1001,6 +989,17 @@ def create_pdf_with_summary(df: pd.DataFrame, sheet_name: str) -> BytesIO:
             textColor=SECONDARY_COLOR,
             spaceAfter=6,
             spaceBefore=10,
+            fontName='Helvetica-Bold'
+        )
+        
+        # Header3 style
+        styles.header3 = ParagraphStyle(
+            name='MyHeader3',
+            parent=base_style,
+            fontSize=12,
+            textColor=colors.HexColor('#555555'),
+            spaceAfter=6,
+            spaceBefore=8,
             fontName='Helvetica-Bold'
         )
         
@@ -1310,23 +1309,51 @@ def create_pdf_with_summary(df: pd.DataFrame, sheet_name: str) -> BytesIO:
                     elements.append(Paragraph(para, styles.normal))
                     elements.append(Spacer(1, 8))  # Add some space after each paragraph
         else:
-            # Add a helpful message when AI isn't available
-            elements.append(Paragraph("ENHANCE YOUR REPORT WITH AI", styles.header1))
-            
-            ai_notice = [
-                "Unlock powerful AI insights with Ollama:",
-                "• Install Ollama from https://ollama.ai/",
-                "• Download a model: `ollama pull gemma3:4b`",
-                "• Run Ollama: `ollama serve` in a terminal",
-                "• Refresh this page to see AI-powered analysis"
-            ]
-            
-            for line in ai_notice:
-                if line.startswith('•'):
-                    elements.append(Paragraph(line, styles.bullet))
+            # Check if Ollama is available
+            try:
+                is_ollama_running, available_models, error_msg = check_ollama_available()
+                if is_ollama_running and available_models:
+                    elements.append(Paragraph("AI ANALYSIS", styles.header1))
+                    elements.append(Paragraph(f"Using model: {available_models[0]}", styles.normal))
+                    elements.append(Spacer(1, 12))
+                    elements.append(Paragraph("Generating AI-powered analysis...", styles.normal))
+                    
+                    # Generate AI analysis
+                    analysis = analyze_employee_data(df)
+                    if analysis['source'] in ['ollama', 'ollama+local']:
+                        ai_insights = analysis['insights']
+                        paragraphs = [p.strip() for p in ai_insights.split('\n') if p.strip()]
+                        
+                        for para in paragraphs:
+                            if para.startswith('#'):  # Handle headers
+                                level = min(len(para.split(' ')[0]), 3)  # Limit to H1-H3
+                                header_text = para.lstrip('#').strip()
+                                if level == 1:
+                                    elements.append(Paragraph(header_text, styles.header2))
+                                elif level == 2:
+                                    elements.append(Paragraph(header_text, styles.header3))
+                                else:
+                                    elements.append(Paragraph(header_text, styles.normal))
+                            elif para.startswith(('•', '-', '*')):  # Handle bullet points
+                                bullet_text = para[1:].strip()
+                                elements.append(Paragraph(f"• {bullet_text}", styles.bullet))
+                            elif para.strip():
+                                elements.append(Paragraph(para, styles.normal))
+                                elements.append(Spacer(1, 8))  # Add some space after each paragraph
                 else:
-                    elements.append(Paragraph(line, styles.normal))
-                    elements.append(Spacer(1, 4))
+                    elements.append(Paragraph("AI ANALYSIS UNAVAILABLE", styles.header1))
+                    if not is_ollama_running:
+                        elements.append(Paragraph("Ollama service is not running.", styles.normal))
+                        elements.append(Paragraph(f"Error: {error_msg}", styles.normal))
+                    elif not available_models:
+                        elements.append(Paragraph("No compatible AI models were found.", styles.normal))
+                        elements.append(Paragraph("Please install a model using 'ollama pull <model_name>'", styles.normal))
+                    elements.append(Paragraph("Falling back to local analysis.", styles.normal))
+            except Exception as e:
+                elements.append(Paragraph("AI ANALYSIS ERROR", styles.header1))
+                elements.append(Paragraph(f"An unexpected error occurred: {str(e)}", styles.normal))
+                elements.append(Paragraph("Please check if Ollama is properly installed and running.", styles.normal))
+                elements.append(Paragraph("Falling back to local analysis.", styles.normal))
         
         # Add footer with page numbers
         def add_page_numbers(canvas, doc):
@@ -1798,15 +1825,6 @@ def main():
             except Exception as e:
                 st.error(f"An error occurred while generating the data: {str(e)}")
                 st.exception(e)  # This will show the full traceback in the app
-
-try:
-    # ... (rest of the code remains the same)
-    st.markdown("### Note:")
-    st.markdown("- When using PDF output, only the first sheet will be included in the summary")
-    st.markdown("- For multi-sheet exports, use the Excel format")
-except Exception as e:
-    st.error(f"An error occurred while generating the data: {str(e)}")
-    st.exception(e)  # This will show the full traceback in the app
 
 if __name__ == "__main__":
     main()
